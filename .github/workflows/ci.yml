@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  repository-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - run: scripts/verify_repository.sh
+      - run: scripts/verify_history.sh
+      - run: scripts/verify_ci_policy.sh
+      - run: tests/scripts/test_release_audits.sh
+      - run: tests/scripts/test_setup_requires_cargo.sh
+
+  python-vision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: python3 -m pip install --requirement vision/requirements.txt
+      - run: python3 -B -m unittest discover -s vision/tests -p 'test_*.py' -v
+        env:
+          PYTHONPATH: vision
+
+  rust-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt
+      - run: cargo fmt --manifest-path qidao-core/Cargo.toml -- --check
+      - run: cargo test --locked --manifest-path qidao-core/Cargo.toml
+
+  swift-boundary:
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: swiftc QiDao/QiDao/AITrustBoundary.swift tests/swift/main.swift -o "$RUNNER_TEMP/qidao-swift-boundary"
+      - run: '"$RUNNER_TEMP/qidao-swift-boundary"'
+
+  macos-app-build:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: QIDAO_SKIP_SIGNING=1 ./build_app.command
+      - run: test -x .build/QiDao.app/Contents/MacOS/QiDao
