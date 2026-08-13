@@ -142,7 +142,7 @@ Run the standalone trust-boundary executable and the rebuilt live-board smoke. C
 - [ ] **Step 2: Run full regression and audits**
 
 ```bash
-PYTHONPATH=vision /Users/horseli/code/.venv/bin/python -B -m unittest discover -s vision/tests -p 'test_*.py' -v
+PYTHONPATH=vision python3 -B -m unittest discover -s vision/tests -p 'test_*.py' -v
 CARGO_TARGET_DIR=/private/tmp/qidao-inactive-refresh-rust cargo test --locked --manifest-path qidao-core/Cargo.toml
 bash scripts/verify_repository.sh
 bash scripts/verify_ci_policy.sh

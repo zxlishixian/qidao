@@ -28,7 +28,7 @@
 - Consumes: `BoardViewModel.refreshLiveWindowsIfNeeded(force:)`, `ScreenAssistManager.handleVisionMessage(_:)`, `ScreenAssistManager.appliedSequence`, and `ScreenAssistManager.objectWillChange`.
 - Produces: a smoke executable that fails if a live position invokes synchronous content display, waits to ACK the model, or publishes unchanged scan telemetry.
 
-- [ ] **Step 1: Add a synchronous-display probe and heartbeat assertions**
+- [x] **Step 1: Add a synchronous-display probe and heartbeat assertions**
 
 Add a content wrapper that records direct synchronous display calls:
 
@@ -66,13 +66,13 @@ Subscribe to `manager.objectWillChange`, reset the count after baseline/running 
 
 Update the hidden-window assertion to require immediate model ACK even when no content window is present; presentation is no longer part of the protocol contract.
 
-- [ ] **Step 2: Compile and verify RED**
+- [x] **Step 2: Compile and verify RED**
 
 Compile the smoke with the same complete Swift source set and local `qidao_coreFFI` used by the existing verification workflow, then run it.
 
 Expected failure on commit `19f37a7`: either `Authoritative live position was not acknowledged immediately`, `Inactive live refresh invoked synchronous displayIfNeeded`, or `Static heartbeats published UI state`.
 
-- [ ] **Step 3: Commit the regression only**
+- [x] **Step 3: Commit the regression only**
 
 ```bash
 git add tools/smoke_live_board_refresh.swift
@@ -93,7 +93,7 @@ git commit -m "test: reproduce inactive live render stall"
 - Consumes: validated `ScreenBoardPosition`, published `boardCells`, `reportQiDaoPositionApplied(board:moveNumber:sequence:)`, and `refreshLiveWindowsIfNeeded(force:)`.
 - Produces: immediate model ACK, nonblocking window invalidation, quiet static heartbeats, and explicit main-run-loop wakeup.
 
-- [ ] **Step 1: Make window refresh asynchronous and nonblocking**
+- [x] **Step 1: Make window refresh asynchronous and nonblocking**
 
 Delete `liveWindowRefreshNeedsCommit` and `liveWindowRefreshCompletions`. Change the signature to:
 
@@ -112,7 +112,7 @@ for window in NSApp.windows where window.isVisible && !(window is NSPanel) {
 
 Do not call `layoutSubtreeIfNeeded`, `displayIfNeeded`, `window.display`, `NSApp.updateWindows`, `CATransaction.flush`, activation APIs, or completion callbacks.
 
-- [ ] **Step 2: ACK immediately after authoritative model commit**
+- [x] **Step 2: ACK immediately after authoritative model commit**
 
 In `finishLivePositionSync`, keep board equality and sequence idempotency checks. After confirming `screenBoardSnapshot() == position.board`, call:
 
@@ -126,7 +126,7 @@ screenAssistManager.reportQiDaoPositionApplied(
 
 Then start/update live analysis once for a new sequence and call `refreshLiveWindowsIfNeeded(force: true)`. Replayed equal sequences may request an asynchronous invalidation but must neither restart KataGo nor wait for presentation.
 
-- [ ] **Step 3: Stop unchanged heartbeats from publishing SwiftUI state**
+- [x] **Step 3: Stop unchanged heartbeats from publishing SwiftUI state**
 
 In the `scan` case, validate the message, then handle `unchanged == true` before assigning any `@Published` property:
 
@@ -143,7 +143,7 @@ guard let nextScanSequence = message["scanSequence"] as? Int,
 
 Only non-heartbeat scans update scan sequence, tracking/performance diagnostics, candidate state, and status text.
 
-- [ ] **Step 4: Wake the main run loop after stdout delivery**
+- [x] **Step 4: Wake the main run loop after stdout delivery**
 
 Immediately after scheduling the stdout data block on `DispatchQueue.main`, add:
 
@@ -153,13 +153,13 @@ CFRunLoopWakeUp(CFRunLoopGetMain())
 
 This must not activate QiDao or change the frontmost application.
 
-- [ ] **Step 5: Compile and verify GREEN**
+- [x] **Step 5: Compile and verify GREEN**
 
 Rebuild and run `tools/smoke_live_board_refresh.swift`.
 
 Expected: exit 0; immediate ACK, zero synchronous display calls, zero static-heartbeat publications, consecutive position/correction/capture assertions, inactive AI result, and hidden-model commit all pass.
 
-- [ ] **Step 6: Commit the production fix**
+- [x] **Step 6: Commit the production fix**
 
 ```bash
 git add QiDao/QiDao/BoardViewModel.swift \
@@ -181,16 +181,16 @@ git commit -m "fix: remove inactive render deadlock"
 - Consumes: green live-board smoke and existing AI-priority smoke.
 - Produces: verified local app bundle and an ordinary fast-forward update of `origin/main`.
 
-- [ ] **Step 1: Run focused Swift verification**
+- [x] **Step 1: Run focused Swift verification**
 
 Compile all Swift application sources including `QiDaoApp.swift`. Run the trust-boundary executable, updated live-board smoke, and `tools/smoke_live_ai_priority.swift`.
 
 Expected: every command exits 0; the board smoke reports the new no-sync-display/quiet-heartbeat checks and the AI smoke reports a first result under five seconds.
 
-- [ ] **Step 2: Run complete regressions and audits**
+- [x] **Step 2: Run complete regressions and audits**
 
 ```bash
-PYTHONPATH=vision /Users/horseli/code/.venv/bin/python -B -m unittest discover -s vision/tests -p 'test_*.py' -v
+PYTHONPATH=vision python3 -B -m unittest discover -s vision/tests -p 'test_*.py' -v
 CARGO_TARGET_DIR=/private/tmp/qidao-inactive-render-rust cargo test --locked --manifest-path qidao-core/Cargo.toml
 bash scripts/verify_repository.sh
 bash scripts/verify_ci_policy.sh
@@ -200,9 +200,9 @@ git diff --check
 
 Expected: 94 Python vision tests, 41 Rust tests, all repository/release audits, and whitespace validation pass.
 
-- [ ] **Step 3: Build and perform real inactive validation**
+- [x] **Step 3: Build and perform real inactive validation**
 
-Run `./build_app.command` and verify the local signature with the project keychain. Launch only `/Users/horseli/code/qidao/.build/QiDao.app`, keep Chrome or WeChat frontmost, and observe the already selected board without clicking QiDao.
+Run `./build_app.command` and verify the local signature with the project keychain. Launch only `$PWD/.build/QiDao.app`, keep Chrome or WeChat frontmost, and observe the already selected board without clicking QiDao.
 
 Confirm:
 
@@ -211,11 +211,11 @@ Confirm:
 - A simulated or controlled board change reaches QiDao within one second.
 - A process sample no longer shows repeated project-triggered `displayIfNeeded` calls or a replay-driven RenderBox wait loop.
 
-- [ ] **Step 4: Update the ledger and review the exact diff**
+- [x] **Step 4: Update the ledger and review the exact diff**
 
 Add one concise `MEMO.md` entry describing the confirmed synchronous-render deadlock, immediate model ACK, quiet heartbeats, and regression coverage. Review every changed hunk and ensure no models, signing data, generated bindings, build output, or local audit branch is staged.
 
-- [ ] **Step 5: Commit documentation and push**
+- [x] **Step 5: Commit documentation and push**
 
 ```bash
 git add MEMO.md \
