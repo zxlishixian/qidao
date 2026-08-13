@@ -1,7 +1,6 @@
 import AppKit
 import Foundation
 import Combine
-import QuartzCore
 import SwiftUI
 import qidao_coreFFI
 
@@ -267,6 +266,10 @@ class BoardViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var lastLiveWindowRefreshAt = Date.distantPast
     private var liveWindowRefreshScheduled = false
+    private var liveWindowRefreshNeedsCommit = false
+    private var liveWindowRefreshCompletions: [() -> Void] = []
+    var pendingLivePositionSequence = 0
+    var awaitingFirstLiveAIResult = false
 
     var treeWidth: CGFloat {
         let maxX = treeNodes.map { $0.x }.max() ?? 0
@@ -336,7 +339,6 @@ class BoardViewModel: ObservableObject {
 
         // Trigger AI move check when engine becomes ready or analysis starts
         Publishers.CombineLatest(aiManager.$isAnalyzing, aiManager.$isEngineReady)
-            .receive(on: RunLoop.main)
             .sink { [weak self] analyzing, ready in
                 if analyzing && ready && self?.appMode == .play {
                     self?.checkAIMove()
@@ -345,7 +347,6 @@ class BoardViewModel: ObservableObject {
             .store(in: &cancellables)
 
         aiManager.$isEngineReady
-            .receive(on: RunLoop.main)
             .sink { [weak self] ready in
                 if ready {
                     self?.updateAnalysis()
@@ -355,7 +356,6 @@ class BoardViewModel: ObservableObject {
             .store(in: &cancellables)
         aiManager.$engineMessage.assign(to: &$engineMessage)
         aiManager.$engineMessage
-            .receive(on: RunLoop.main)
             .sink { [weak self] message in
                 guard let self, self.analysisResult == nil else { return }
                 self.screenAssistManager.updateAI(
@@ -369,15 +369,20 @@ class BoardViewModel: ObservableObject {
             }
             .store(in: &cancellables)
         aiManager.$analysisResult
-            .receive(on: RunLoop.main)
             // KataGo can publish partial search results around 20 times per
             // second. Relaying each one through BoardViewModel invalidated the
             // entire 361-intersection SwiftUI board and could starve a live
             // vision position waiting on the same main actor. Preserve the
             // first/latest result while bounding presentation work to 8 Hz.
-            .throttle(for: .milliseconds(120), scheduler: RunLoop.main, latest: true)
+            .throttle(for: .milliseconds(120), scheduler: DispatchQueue.main, latest: true)
             .sink { [weak self] result in
                 guard let self else { return }
+                let isFirstCurrentLiveResult = self.awaitingFirstLiveAIResult
+                    && result?.moveInfos.isEmpty == false
+                    && result?.id.hasSuffix("-\(self.currentNodeId)") == true
+                if isFirstCurrentLiveResult {
+                    self.awaitingFirstLiveAIResult = false
+                }
                 self.analysisResult = result
                 guard let result else {
                     self.screenAssistManager.updateAI(
@@ -413,7 +418,7 @@ class BoardViewModel: ObservableObject {
                     visits: Int(result.rootInfo.visits),
                     candidates: candidates
                 )
-                self.refreshLiveWindowsIfNeeded()
+                self.refreshLiveWindowsIfNeeded(force: isFirstCurrentLiveResult)
             }
             .store(in: &cancellables)
         aiManager.$logEntries.assign(to: &$logEntries)
@@ -427,55 +432,58 @@ class BoardViewModel: ObservableObject {
         force: Bool = false,
         completion: (() -> Void)? = nil
     ) {
-        if force {
-            // SwiftUI normally commits on the next active-window event. When
-            // the user is playing in another client, that event may be the
-            // later click that used to make several queued stones suddenly
-            // appear. A board change is infrequent, so explicitly commit this
-            // one presentation transaction even while QiDao is inactive.
-            DispatchQueue.main.async {
-                for window in NSApp.windows where window.isVisible && !(window is NSPanel) {
-                    guard let contentView = window.contentView else { continue }
-                    contentView.needsLayout = true
-                    contentView.layoutSubtreeIfNeeded()
-                    contentView.needsDisplay = true
-                    contentView.displayIfNeeded()
-                    window.displayIfNeeded()
-                }
-                NSApp.updateWindows()
-                CATransaction.flush()
-                completion?()
+        let requiresPresentationCommit = force || completion != nil
+        if !requiresPresentationCommit {
+            guard screenAssistManager.isMonitoring || screenAssistManager.isReRecognizing else {
+                return
             }
-            return
+            let now = Date()
+            guard now.timeIntervalSince(lastLiveWindowRefreshAt) >= 0.10 else { return }
+            lastLiveWindowRefreshAt = now
         }
 
-        guard screenAssistManager.isMonitoring || screenAssistManager.isReRecognizing else {
-            completion?()
-            return
-        }
-        // KataGo can report search progress 20 times per second. Forcing every
-        // transparent overlay and SwiftUI window to synchronously display for
-        // each report starves the main actor without making the UI visibly
-        // smoother. Board changes bypass this throttle via `force: true`.
-        let now = Date()
-        guard force || now.timeIntervalSince(lastLiveWindowRefreshAt) >= 0.10 else { return }
-        lastLiveWindowRefreshAt = now
-        // Published state already wakes SwiftUI while QiDao is inactive.  A
-        // previous workaround synchronously called `display()` on every app
-        // and overlay window for each AI/vision update. RenderBox can block
-        // that call until the next compositor transaction, starving the main
-        // actor that must first consume the next recognized position. Coalesce
-        // invalidation into one future run-loop turn and never wait for paint.
+        if requiresPresentationCommit { liveWindowRefreshNeedsCommit = true }
+        if let completion { liveWindowRefreshCompletions.append(completion) }
+
+        // Model updates and KataGo submission happen before this method. Keep
+        // presentation as a coalesced two-phase side effect: first invalidate,
+        // then give SwiftUI one run-loop turn to commit its value snapshot
+        // before asking an inactive hosting view to lay out and draw it.
         guard !liveWindowRefreshScheduled else { return }
         liveWindowRefreshScheduled = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.liveWindowRefreshScheduled = false
             for window in NSApp.windows where window.isVisible && !(window is NSPanel) {
-                window.contentView?.needsLayout = true
-                window.contentView?.needsDisplay = true
+                guard let contentView = window.contentView else { continue }
+                contentView.needsLayout = true
+                contentView.needsDisplay = true
             }
-            completion?()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+                guard let self else { return }
+                let shouldCommit = self.liveWindowRefreshNeedsCommit
+                self.liveWindowRefreshNeedsCommit = false
+                var didPresent = false
+                if shouldCommit {
+                    for window in NSApp.windows
+                    where window.isVisible && !window.isMiniaturized && !(window is NSPanel) {
+                        guard let contentView = window.contentView else { continue }
+                        contentView.layoutSubtreeIfNeeded()
+                        contentView.needsDisplay = true
+                        contentView.displayIfNeeded()
+                        didPresent = true
+                    }
+                }
+
+                self.liveWindowRefreshScheduled = false
+                let completions = self.liveWindowRefreshCompletions
+                self.liveWindowRefreshCompletions.removeAll(keepingCapacity: true)
+                // If no QiDao content window could present, deliberately do
+                // not ACK. The vision service retains and replays the newest
+                // position after 400 ms, providing automatic recovery.
+                if didPresent {
+                    completions.forEach { $0() }
+                }
+            }
         }
     }
 
@@ -626,7 +634,12 @@ class BoardViewModel: ObservableObject {
             return
         }
 
-        let isLiveScreenAnalysis = screenAssistManager.isMonitoring
+        // The baseline callback arrives just before the service confirms its
+        // running state. Treat the whole calibrated screen-assist session as
+        // live so its first query is not debounced behind a full-game scan.
+        let isLiveScreenAnalysis = screenAssistManager.hasBaseline
+            || screenAssistManager.isMonitoring
+            || screenAssistManager.isReRecognizing
         if isLiveScreenAnalysis {
             // Full-game scanning has lower protocol priority but still shares
             // neural-network batches with the interactive query. Pause it so

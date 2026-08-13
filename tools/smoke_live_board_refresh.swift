@@ -4,12 +4,33 @@ import AppKit
 import SwiftUI
 import qidao_coreFFI
 
-private final class LivePresentationProbeView: NSView {
-    private(set) var drawCount = 0
+private final class LiveRevisionProbeView: NSView {
+    var renderedRevision: UInt64 = 0
+}
 
-    override func draw(_ dirtyRect: NSRect) {
-        drawCount += 1
-        super.draw(dirtyRect)
+private struct LiveRevisionProbe: NSViewRepresentable {
+    let revision: UInt64
+    let probe: LiveRevisionProbeView
+
+    func makeNSView(context: Context) -> LiveRevisionProbeView {
+        probe
+    }
+
+    func updateNSView(_ nsView: LiveRevisionProbeView, context: Context) {
+        nsView.renderedRevision = revision
+    }
+}
+
+private struct LiveBoardSmokeRoot: View {
+    @ObservedObject var viewModel: BoardViewModel
+    let probe: LiveRevisionProbeView
+
+    var body: some View {
+        ZStack {
+            GameBoardView(viewModel: viewModel, size: 500)
+            LiveRevisionProbe(revision: viewModel.boardRevision, probe: probe)
+                .frame(width: 1, height: 1)
+        }
     }
 }
 
@@ -174,16 +195,15 @@ struct LiveBoardRefreshSmoke {
             backing: .buffered,
             defer: false
         )
-        let hosting = NSHostingView(rootView: GameBoardView(viewModel: viewModel, size: 500))
-        hosting.frame = NSRect(x: 0, y: 0, width: 520, height: 520)
-        let presentationProbe = LivePresentationProbeView(
-            frame: NSRect(x: 0, y: 0, width: 520, height: 520)
+        let revisionProbe = LiveRevisionProbeView(frame: .zero)
+        let hosting = NSHostingView(
+            rootView: LiveBoardSmokeRoot(viewModel: viewModel, probe: revisionProbe)
         )
-        presentationProbe.addSubview(hosting)
-        window.contentView = presentationProbe
+        hosting.frame = NSRect(x: 0, y: 0, width: 520, height: 520)
+        window.contentView = hosting
         window.orderFrontRegardless()
         window.displayIfNeeded()
-        let drawsBeforePosition = presentationProbe.drawCount
+        let renderedRevisionBeforePosition = revisionProbe.renderedRevision
 
         let manager = viewModel.screenAssistManager
         manager.boardSize = 9
@@ -213,19 +233,127 @@ struct LiveBoardRefreshSmoke {
             "nextPlayer": "W",
             "confidence": 0.99,
             "scanSequence": 1,
-            "positionSequence": 0,
+            "positionSequence": 1,
             "confirmation": "inactive-window-smoke",
         ])
-        RunLoop.main.run(until: Date().addingTimeInterval(0.20))
+
+        // The model update and AI submission must not wait for paint, but the
+        // protocol ACK must. Until the inactive SwiftUI tree has presented the
+        // revision, leaving this sequence unacknowledged makes the vision
+        // service replay it every 400 ms instead of relying on a user click.
+        guard viewModel.displayedStone(x: 5, y: 2) == .black else {
+            fatalError("Live model update waited for an inactive-window paint")
+        }
+        guard manager.appliedSequence == 0 else {
+            fatalError("Vision position was acknowledged before inactive-window presentation")
+        }
+        let presentationDeadline = Date().addingTimeInterval(1)
+        while (revisionProbe.renderedRevision != viewModel.boardRevision
+                || manager.appliedSequence != 1),
+              Date() < presentationDeadline {
+            _ = RunLoop.main.run(
+                mode: .eventTracking,
+                before: min(Date().addingTimeInterval(0.02), presentationDeadline)
+            )
+        }
 
         guard viewModel.displayedStone(x: 5, y: 2) == .black else {
             fatalError("Vision protocol position did not reach the displayed board")
         }
         guard manager.isSyncedToQiDao else {
-            fatalError("Vision position was acknowledged before/without a committed UI frame")
+            fatalError("Vision position was not acknowledged after the committed UI frame")
         }
-        guard presentationProbe.drawCount > drawsBeforePosition else {
-            fatalError("Inactive AppKit window was not drawn before the vision position acknowledgement")
+        guard revisionProbe.renderedRevision > renderedRevisionBeforePosition,
+              revisionProbe.renderedRevision == viewModel.boardRevision else {
+            fatalError("Inactive SwiftUI board did not commit the latest revision")
+        }
+
+        // An inactive app commonly runs the event-tracking mode while the
+        // user interacts with another board client. AI publications must not
+        // wait for QiDao's default run-loop mode or a settings-button click.
+        let inactiveResult = AnalysisResult(
+            id: "qidao-0-\(viewModel.currentNodeId)",
+            turnNumber: UInt32(viewModel.moveCount),
+            isDuringSearch: true,
+            noResults: false,
+            rootInfo: AnalysisRootInfo(winrate: 0.61, scoreLead: 2.5, visits: 7),
+            moveInfos: [
+                AnalysisMoveInfo(
+                    moveStr: "G7",
+                    visits: 7,
+                    winrate: 0.61,
+                    scoreLead: 2.5,
+                    pv: ["G7"]
+                )
+            ],
+            ownership: nil
+        )
+        viewModel.aiManager.analysisResult = inactiveResult
+        let inactiveDeadline = Date().addingTimeInterval(0.5)
+        while viewModel.analysisResult?.rootInfo.visits != 7, Date() < inactiveDeadline {
+            _ = RunLoop.main.run(
+                mode: .eventTracking,
+                before: min(Date().addingTimeInterval(0.02), inactiveDeadline)
+            )
+        }
+        guard viewModel.analysisResult?.rootInfo.visits == 7,
+              manager.aiCandidates.first?.vertex == "G7" else {
+            fatalError("AI result waited for QiDao's default run-loop mode")
+        }
+
+        // If no QiDao content window can present, do not ACK the next
+        // sequence. The real vision process will replay it after 400 ms; once
+        // the window is visible again, the idempotent replay must present and
+        // acknowledge without requiring a click inside QiDao.
+        window.orderOut(nil)
+        var hiddenPosition = protocolPosition
+        hiddenPosition[4][4] = 2
+        manager.handleVisionMessage([
+            "event": "position",
+            "board": hiddenPosition,
+            "observedBoard": hiddenPosition,
+            "lastMove": [
+                "x": 4, "y": 4, "color": 2, "vertex": "E5", "boardSize": 9, "pass": false,
+            ],
+            "moveNumber": 2,
+            "nextPlayer": "B",
+            "confidence": 0.99,
+            "scanSequence": 2,
+            "positionSequence": 2,
+            "confirmation": "hidden-window-smoke",
+        ])
+        RunLoop.main.run(until: Date().addingTimeInterval(0.10))
+        guard viewModel.displayedStone(x: 4, y: 4) == .white,
+              manager.appliedSequence == 1 else {
+            fatalError("Hidden position was lost or acknowledged without presentation")
+        }
+
+        window.orderFrontRegardless()
+        manager.handleVisionMessage([
+            "event": "position",
+            "board": hiddenPosition,
+            "observedBoard": hiddenPosition,
+            "lastMove": [
+                "x": 4, "y": 4, "color": 2, "vertex": "E5", "boardSize": 9, "pass": false,
+            ],
+            "moveNumber": 2,
+            "nextPlayer": "B",
+            "confidence": 0.99,
+            "scanSequence": 2,
+            "positionSequence": 2,
+            "confirmation": "hidden-window-smoke",
+            "replayed": true,
+        ])
+        let replayDeadline = Date().addingTimeInterval(1)
+        while manager.appliedSequence != 2, Date() < replayDeadline {
+            _ = RunLoop.main.run(
+                mode: .eventTracking,
+                before: min(Date().addingTimeInterval(0.02), replayDeadline)
+            )
+        }
+        guard manager.appliedSequence == 2,
+              revisionProbe.renderedRevision == viewModel.boardRevision else {
+            fatalError("Replayed position did not recover after the window became presentable")
         }
         window.orderOut(nil)
 

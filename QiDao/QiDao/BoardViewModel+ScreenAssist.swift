@@ -141,12 +141,28 @@ extension BoardViewModel {
             )
             return
         }
-        // GameManager.syncState publishes one immutable view snapshot. The
-        // BoardViewModel binding increments boardRevision synchronously, so the
-        // central board redraws in this same main-run-loop transaction.
-        // Do not acknowledge the pipe message before the inactive QiDao
-        // window has actually committed its new SwiftUI frame. If a newer
-        // position arrives first, its own completion supersedes this one.
+        // Replayed positions must refresh presentation but must not restart
+        // KataGo every 400 ms while an inactive/hidden window is recovering.
+        if position.sequence <= 0 {
+            pendingLivePositionSequence = 0
+        }
+        let isNewSequence = position.sequence <= 0
+            || position.sequence > pendingLivePositionSequence
+        if position.sequence > 0 {
+            pendingLivePositionSequence = max(
+                pendingLivePositionSequence,
+                position.sequence
+            )
+        }
+        if requestAnalysis && isNewSequence {
+            awaitingFirstLiveAIResult = true
+            screenAssistManager.beginAIResponseTiming()
+            startAnalysisForLivePositionIfNeeded()
+        }
+        // Start AI immediately, but keep the protocol position unacknowledged
+        // until the inactive SwiftUI tree has had a chance to present it. If
+        // that presentation is missed, the service replays the same sequence
+        // and this idempotent path tries again without waiting for a click.
         refreshLiveWindowsIfNeeded(force: true) { [weak self] in
             guard let self, self.screenBoardSnapshot() == position.board else { return }
             self.screenAssistManager.reportQiDaoPositionApplied(
@@ -154,9 +170,6 @@ extension BoardViewModel {
                 moveNumber: position.moveNumber,
                 sequence: position.sequence
             )
-            guard requestAnalysis else { return }
-            self.screenAssistManager.beginAIResponseTiming()
-            self.startAnalysisForLivePositionIfNeeded()
         }
     }
 }

@@ -180,6 +180,14 @@ class AIManager: ObservableObject {
                     nanoseconds: fastResponse ? 20_000_000 : 500_000_000
                 )
 
+                // Cancelling `fullScanTask` only stops QiDao from waiting for
+                // that query; KataGo keeps searching until it receives an
+                // explicit terminate command. Send it on this same ordered
+                // stdin path before the current live-position query.
+                if fastResponse {
+                    try? await engine.terminate(id: "fullscan-\(self.analysisSessionId)")
+                }
+
                 if let oldId = self.currentAnalysisId {
                     try? await engine.terminate(id: oldId)
                 }

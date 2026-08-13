@@ -14,10 +14,10 @@ QiDao 保持失焦且不抢回焦点时：
 
 代码审查发现两个仍然存在的链路缺口：
 
-1. `refreshLiveWindowsIfNeeded` 在一次主队列回调中同时标记并立即绘制内容视图。SwiftUI 的 `objectWillChange` 可能尚未完成视图树事务，此时绘制的仍是旧棋盘；失焦后没有后续窗口事件，直到用户点击 QiDao 才提交新视图。
+1. 真实 `NSHostingView` 回归证明 SwiftUI 能在失焦 event-tracking 模式下提交局面，因此问题不是模型发布本身。真正的恢复缺口是 Swift 在模型写入后、呈现前就 ACK `positionSequence`；视觉服务随即停止每 400 ms 的幂等重放。若某次失焦窗口呈现没有落地，此后没有协议事件再次推动它，直到用户点击 QiDao。
 2. `stopFullGameAnalysis()` 只取消本地 Swift `Task`，没有向 KataGo 发送 `terminate`。已经提交的 `fullscan-*` 查询仍会占用神经网络批次，实时查询虽然优先级较高，首个结果仍可能被拖慢。
 
-第一点必须由真实 `NSHostingView` 失焦回归测试确认后再修改；第二点可由模拟 KataGo 协议记录命令顺序确认。
+第一点由真实 `NSHostingView` 失焦回归测试验证 ACK 时序；第二点由模拟 KataGo 协议记录命令顺序确认。
 
 ## 设计
 
@@ -28,7 +28,8 @@ QiDao 保持失焦且不抢回焦点时：
 1. 合并同一时间段内的刷新请求，避免每个视觉心跳或 KataGo 局部结果都重复绘制。
 2. 第一阶段只标记 QiDao 主内容视图需要布局和显示，然后返回主 RunLoop，让 SwiftUI 完成状态事务。
 3. 约一个显示帧后执行第二阶段，仅对可见的非 `NSPanel` 主窗口调用 `layoutSubtreeIfNeeded()` 和 `displayIfNeeded()`。
-4. 不调用 `activate`、`makeKeyAndOrderFront`、`NSApp.updateWindows` 或 `CATransaction.flush`，不改变焦点和窗口层级，也不增加常驻定时器。
+4. 第二阶段呈现成功后才 ACK 对应 `positionSequence`；没有可呈现的 QiDao 主窗口时不 ACK，让视觉服务保留并重放最新局面。
+5. 不调用 `activate`、`makeKeyAndOrderFront`、`NSApp.updateWindows` 或 `CATransaction.flush`，不改变焦点和窗口层级，也不增加常驻定时器。
 
 棋盘局面更新使用强制刷新；AI 的首个有效结果也使用强制刷新。后续高频分析结果仍保留 120ms 节流和合并。
 
@@ -51,7 +52,7 @@ QiDao 保持失焦且不抢回焦点时：
 
 ## 测试与验收
 
-1. 扩展实时棋盘 Swift smoke，使用真实 `NSHostingView` 和 `NSViewRepresentable` 探针；只运行非默认 RunLoop 模式，证明失焦窗口在 1 秒内渲染最新 revision。测试必须在当前单阶段实现上失败。
+1. 扩展实时棋盘 Swift smoke，使用真实 `NSHostingView` 和 `NSViewRepresentable` 探针；证明模型立即更新、呈现之前不 ACK，以及失焦窗口在 1 秒内渲染最新 revision 并完成 ACK。测试必须在原有过早 ACK 实现上失败。
 2. 增加模拟 KataGo 协议 smoke，先制造 `fullscan-*`，再提交实时局面；断言 `terminate fullscan-*` 先于新的 `qidao-*` 查询，并在 5 秒内收到首个候选。测试必须在当前实现上失败。
 3. 修复后运行 Swift smoke、完整 Swift 编译、94 个视觉测试、41 个 Rust 测试以及仓库/敏感文件审计。
 4. 构建新的 `.build/QiDao.app`，确认二进制包含新方法签名；普通 fast-forward 推送 `main`，不上传模型、签名材料、生成 Core 文件或本地审计分支。

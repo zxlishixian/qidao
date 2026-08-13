@@ -488,7 +488,10 @@ final class ScreenAssistManager: ObservableObject {
         isSyncedToQiDao = true
         syncedMoveNumber = moveNumber
         appliedSequence = max(appliedSequence, sequence)
-        if sequence > 0 {
+        // An ACK is meaningful only for the child that delivered the
+        // position. Never launch a new vision process merely to acknowledge a
+        // process that has already exited (also keeps protocol smokes local).
+        if sequence > 0, input != nil {
             send(["command": "ackPosition", "sequence": sequence])
         }
         let stones = board.flatMap { $0 }.filter { $0 == 1 || $0 == 2 }.count
