@@ -141,8 +141,9 @@ extension BoardViewModel {
             )
             return
         }
-        // Replayed positions must refresh presentation but must not restart
-        // KataGo every 400 ms while an inactive/hidden window is recovering.
+        // The authoritative model commit, not WindowServer presentation, is
+        // the protocol boundary. ACK it immediately so an inactive render can
+        // never create a replay loop that starves later vision messages.
         if position.sequence <= 0 {
             pendingLivePositionSequence = 0
         }
@@ -154,22 +155,16 @@ extension BoardViewModel {
                 position.sequence
             )
         }
+        screenAssistManager.reportQiDaoPositionApplied(
+            board: applied,
+            moveNumber: position.moveNumber,
+            sequence: position.sequence
+        )
         if requestAnalysis && isNewSequence {
             awaitingFirstLiveAIResult = true
             screenAssistManager.beginAIResponseTiming()
             startAnalysisForLivePositionIfNeeded()
         }
-        // Start AI immediately, but keep the protocol position unacknowledged
-        // until the inactive SwiftUI tree has had a chance to present it. If
-        // that presentation is missed, the service replays the same sequence
-        // and this idempotent path tries again without waiting for a click.
-        refreshLiveWindowsIfNeeded(force: true) { [weak self] in
-            guard let self, self.screenBoardSnapshot() == position.board else { return }
-            self.screenAssistManager.reportQiDaoPositionApplied(
-                board: applied,
-                moveNumber: position.moveNumber,
-                sequence: position.sequence
-            )
-        }
+        refreshLiveWindowsIfNeeded(force: true)
     }
 }

@@ -183,6 +183,10 @@ final class ScreenAssistManager: ObservableObject {
                 }
                 self.consume(data)
             }
+            // Dispatch normally wakes the main queue, but make the run-loop
+            // wake explicit for an inactive AppKit application. This never
+            // activates QiDao or changes the key window.
+            CFRunLoopWakeUp(CFRunLoopGetMain())
         }
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
@@ -679,20 +683,20 @@ final class ScreenAssistManager: ObservableObject {
             }
             if !isMonitoring { overlay.hideAll() }
         case "scan":
-            guard AITrustBoundary.isValidVisionScan(message, boardSize: boardSize),
-                  let nextScanSequence = message["scanSequence"] as? Int,
+            guard AITrustBoundary.isValidVisionScan(message, boardSize: boardSize) else { return }
+            if message["unchanged"] as? Bool == true {
+                // The quad was updated before the switch. Static heartbeats
+                // contain no user-visible state, so do not invalidate the
+                // entire SwiftUI window at the capture rate.
+                refreshTrackingOverlay()
+                break
+            }
+            guard let nextScanSequence = message["scanSequence"] as? Int,
                   let nextMoveNumber = message["moveNumber"] as? Int,
                   let nextPlayerValue = message["nextPlayer"] as? String else { return }
             if nextScanSequence != scanSequence { scanSequence = nextScanSequence }
             updateTrackingState(message)
             updatePerformance(message)
-            if message["unchanged"] as? Bool == true {
-                // Heartbeats keep the tracking frame aligned but contain no
-                // board data. Avoid publishing a dozen identical properties
-                // on the main actor while another app has focus.
-                refreshTrackingOverlay()
-                break
-            }
             if let value = message["confidence"] as? Double, value != confidence { confidence = value }
             if let value = message["observedConfidence"] as? Double, value != observedConfidence {
                 observedConfidence = value

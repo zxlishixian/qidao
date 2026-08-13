@@ -266,8 +266,6 @@ class BoardViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var lastLiveWindowRefreshAt = Date.distantPast
     private var liveWindowRefreshScheduled = false
-    private var liveWindowRefreshNeedsCommit = false
-    private var liveWindowRefreshCompletions: [() -> Void] = []
     var pendingLivePositionSequence = 0
     var awaitingFirstLiveAIResult = false
 
@@ -428,12 +426,8 @@ class BoardViewModel: ObservableObject {
         aiManager.$isFullGameScanning.assign(to: &$isFullGameScanning)
     }
 
-    func refreshLiveWindowsIfNeeded(
-        force: Bool = false,
-        completion: (() -> Void)? = nil
-    ) {
-        let requiresPresentationCommit = force || completion != nil
-        if !requiresPresentationCommit {
+    func refreshLiveWindowsIfNeeded(force: Bool = false) {
+        if !force {
             guard screenAssistManager.isMonitoring || screenAssistManager.isReRecognizing else {
                 return
             }
@@ -442,47 +436,18 @@ class BoardViewModel: ObservableObject {
             lastLiveWindowRefreshAt = now
         }
 
-        if requiresPresentationCommit { liveWindowRefreshNeedsCommit = true }
-        if let completion { liveWindowRefreshCompletions.append(completion) }
-
-        // Model updates and KataGo submission happen before this method. Keep
-        // presentation as a coalesced two-phase side effect: first invalidate,
-        // then give SwiftUI one run-loop turn to commit its value snapshot
-        // before asking an inactive hosting view to lay out and draw it.
+        // Published state is authoritative. Only invalidate the visible
+        // content tree here and let AppKit/SwiftUI present it asynchronously.
+        // Synchronous display waits can block on RenderBox while QiDao is
+        // inactive, starving the vision messages that must advance the model.
         guard !liveWindowRefreshScheduled else { return }
         liveWindowRefreshScheduled = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            self.liveWindowRefreshScheduled = false
             for window in NSApp.windows where window.isVisible && !(window is NSPanel) {
-                guard let contentView = window.contentView else { continue }
-                contentView.needsLayout = true
-                contentView.needsDisplay = true
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
-                guard let self else { return }
-                let shouldCommit = self.liveWindowRefreshNeedsCommit
-                self.liveWindowRefreshNeedsCommit = false
-                var didPresent = false
-                if shouldCommit {
-                    for window in NSApp.windows
-                    where window.isVisible && !window.isMiniaturized && !(window is NSPanel) {
-                        guard let contentView = window.contentView else { continue }
-                        contentView.layoutSubtreeIfNeeded()
-                        contentView.needsDisplay = true
-                        contentView.displayIfNeeded()
-                        didPresent = true
-                    }
-                }
-
-                self.liveWindowRefreshScheduled = false
-                let completions = self.liveWindowRefreshCompletions
-                self.liveWindowRefreshCompletions.removeAll(keepingCapacity: true)
-                // If no QiDao content window could present, deliberately do
-                // not ACK. The vision service retains and replays the newest
-                // position after 400 ms, providing automatic recovery.
-                if didPresent {
-                    completions.forEach { $0() }
-                }
+                window.contentView?.needsLayout = true
+                window.contentView?.needsDisplay = true
             }
         }
     }
