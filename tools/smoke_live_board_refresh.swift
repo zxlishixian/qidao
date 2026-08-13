@@ -8,6 +8,19 @@ private final class LiveRevisionProbeView: NSView {
     var renderedRevision: UInt64 = 0
 }
 
+private final class SynchronousDisplayProbeView: NSView {
+    private(set) var displayIfNeededCalls = 0
+
+    override func displayIfNeeded() {
+        displayIfNeededCalls += 1
+        super.displayIfNeeded()
+    }
+
+    func reset() {
+        displayIfNeededCalls = 0
+    }
+}
+
 private struct LiveRevisionProbe: NSViewRepresentable {
     let revision: UInt64
     let probe: LiveRevisionProbeView
@@ -200,9 +213,15 @@ struct LiveBoardRefreshSmoke {
             rootView: LiveBoardSmokeRoot(viewModel: viewModel, probe: revisionProbe)
         )
         hosting.frame = NSRect(x: 0, y: 0, width: 520, height: 520)
-        window.contentView = hosting
+        hosting.autoresizingMask = [.width, .height]
+        let displayProbe = SynchronousDisplayProbeView(
+            frame: NSRect(x: 0, y: 0, width: 520, height: 520)
+        )
+        displayProbe.addSubview(hosting)
+        window.contentView = displayProbe
         window.orderFrontRegardless()
         window.displayIfNeeded()
+        displayProbe.reset()
         let renderedRevisionBeforePosition = revisionProbe.renderedRevision
 
         let manager = viewModel.screenAssistManager
@@ -219,6 +238,27 @@ struct LiveBoardRefreshSmoke {
             "nextPlayer": "B",
         ])
         manager.handleVisionMessage(["event": "running", "running": true])
+
+        var heartbeatPublications = 0
+        let heartbeatSubscription = manager.objectWillChange.sink {
+            heartbeatPublications += 1
+        }
+        let scanSequenceBeforeHeartbeats = manager.scanSequence
+        for sequence in 1...30 {
+            manager.handleVisionMessage([
+                "event": "scan",
+                "scanSequence": sequence,
+                "moveNumber": 0,
+                "nextPlayer": "B",
+                "unchanged": true,
+            ])
+        }
+        guard heartbeatPublications == 0,
+              manager.scanSequence == scanSequenceBeforeHeartbeats else {
+            fatalError(
+                "Static heartbeats published UI state: \(heartbeatPublications) publications"
+            )
+        }
 
         var protocolPosition = emptyNine
         protocolPosition[2][5] = 1
@@ -237,19 +277,17 @@ struct LiveBoardRefreshSmoke {
             "confirmation": "inactive-window-smoke",
         ])
 
-        // The model update and AI submission must not wait for paint, but the
-        // protocol ACK must. Until the inactive SwiftUI tree has presented the
-        // revision, leaving this sequence unacknowledged makes the vision
-        // service replay it every 400 ms instead of relying on a user click.
+        // The authoritative model update, ACK and AI submission must not wait
+        // for WindowServer presentation. Rendering is an asynchronous
+        // consequence of the published board snapshot.
         guard viewModel.displayedStone(x: 5, y: 2) == .black else {
-            fatalError("Live model update waited for an inactive-window paint")
+            fatalError("Live model update waited for inactive presentation")
         }
-        guard manager.appliedSequence == 0 else {
-            fatalError("Vision position was acknowledged before inactive-window presentation")
+        guard manager.appliedSequence == 1 else {
+            fatalError("Authoritative live position was not acknowledged immediately")
         }
         let presentationDeadline = Date().addingTimeInterval(1)
-        while (revisionProbe.renderedRevision != viewModel.boardRevision
-                || manager.appliedSequence != 1),
+        while revisionProbe.renderedRevision != viewModel.boardRevision,
               Date() < presentationDeadline {
             _ = RunLoop.main.run(
                 mode: .eventTracking,
@@ -261,11 +299,14 @@ struct LiveBoardRefreshSmoke {
             fatalError("Vision protocol position did not reach the displayed board")
         }
         guard manager.isSyncedToQiDao else {
-            fatalError("Vision position was not acknowledged after the committed UI frame")
+            fatalError("Vision position was not acknowledged after model commit")
         }
         guard revisionProbe.renderedRevision > renderedRevisionBeforePosition,
               revisionProbe.renderedRevision == viewModel.boardRevision else {
             fatalError("Inactive SwiftUI board did not commit the latest revision")
+        }
+        guard displayProbe.displayIfNeededCalls == 0 else {
+            fatalError("Inactive live refresh invoked synchronous displayIfNeeded")
         }
 
         // An inactive app commonly runs the event-tracking mode while the
@@ -301,10 +342,9 @@ struct LiveBoardRefreshSmoke {
             fatalError("AI result waited for QiDao's default run-loop mode")
         }
 
-        // If no QiDao content window can present, do not ACK the next
-        // sequence. The real vision process will replay it after 400 ms; once
-        // the window is visible again, the idempotent replay must present and
-        // acknowledge without requiring a click inside QiDao.
+        // Hidden-window model commits are authoritative too. Showing the
+        // window later may replay the same sequence to request asynchronous
+        // invalidation, but must not restart model or protocol progress.
         window.orderOut(nil)
         var hiddenPosition = protocolPosition
         hiddenPosition[4][4] = 2
@@ -324,8 +364,8 @@ struct LiveBoardRefreshSmoke {
         ])
         RunLoop.main.run(until: Date().addingTimeInterval(0.10))
         guard viewModel.displayedStone(x: 4, y: 4) == .white,
-              manager.appliedSequence == 1 else {
-            fatalError("Hidden position was lost or acknowledged without presentation")
+              manager.appliedSequence == 2 else {
+            fatalError("Hidden position was not committed and acknowledged immediately")
         }
 
         window.orderFrontRegardless()
@@ -345,7 +385,8 @@ struct LiveBoardRefreshSmoke {
             "replayed": true,
         ])
         let replayDeadline = Date().addingTimeInterval(1)
-        while manager.appliedSequence != 2, Date() < replayDeadline {
+        while revisionProbe.renderedRevision != viewModel.boardRevision,
+              Date() < replayDeadline {
             _ = RunLoop.main.run(
                 mode: .eventTracking,
                 before: min(Date().addingTimeInterval(0.02), replayDeadline)
@@ -357,7 +398,7 @@ struct LiveBoardRefreshSmoke {
         }
         window.orderOut(nil)
 
-        withExtendedLifetime(subscription) {}
+        withExtendedLifetime((subscription, heartbeatSubscription)) {}
         print(
             "Live board refresh OK: move, consecutive screen events, full-position correction and capture, revision "
                 + "\(initialRevision) -> \(viewModel.boardRevision), "
