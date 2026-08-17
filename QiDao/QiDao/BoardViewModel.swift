@@ -267,7 +267,8 @@ class BoardViewModel: ObservableObject {
     private var lastLiveWindowRefreshAt = Date.distantPast
     private var liveWindowRefreshScheduled = false
     var pendingLivePositionSequence = 0
-    var awaitingFirstLiveAIResult = false
+    var awaitingFirstAnalysisResult = false
+    var pendingAnalysisIsLive = false
 
     var treeWidth: CGFloat {
         let maxX = treeNodes.map { $0.x }.max() ?? 0
@@ -348,7 +349,6 @@ class BoardViewModel: ObservableObject {
             .sink { [weak self] ready in
                 if ready {
                     self?.updateAnalysis()
-                    self?.startFullGameAnalysis()
                 }
             }
             .store(in: &cancellables)
@@ -375,11 +375,13 @@ class BoardViewModel: ObservableObject {
             .throttle(for: .milliseconds(120), scheduler: DispatchQueue.main, latest: true)
             .sink { [weak self] result in
                 guard let self else { return }
-                let isFirstCurrentLiveResult = self.awaitingFirstLiveAIResult
+                let isFirstCurrentResult = self.awaitingFirstAnalysisResult
                     && result?.moveInfos.isEmpty == false
                     && result?.id.hasSuffix("-\(self.currentNodeId)") == true
-                if isFirstCurrentLiveResult {
-                    self.awaitingFirstLiveAIResult = false
+                let wasLiveRequest = self.pendingAnalysisIsLive
+                if isFirstCurrentResult {
+                    self.awaitingFirstAnalysisResult = false
+                    self.pendingAnalysisIsLive = false
                 }
                 self.analysisResult = result
                 guard let result else {
@@ -416,7 +418,13 @@ class BoardViewModel: ObservableObject {
                     visits: Int(result.rootInfo.visits),
                     candidates: candidates
                 )
-                self.refreshLiveWindowsIfNeeded(force: isFirstCurrentLiveResult)
+                self.refreshLiveWindowsIfNeeded(force: isFirstCurrentResult)
+                if isFirstCurrentResult,
+                   !wasLiveRequest,
+                   self.appMode == .analysis,
+                   self.config.display.showWinRateGraph {
+                    self.startFullGameAnalysis()
+                }
             }
             .store(in: &cancellables)
         aiManager.$logEntries.assign(to: &$logEntries)
@@ -605,10 +613,12 @@ class BoardViewModel: ObservableObject {
         let isLiveScreenAnalysis = screenAssistManager.hasBaseline
             || screenAssistManager.isMonitoring
             || screenAssistManager.isReRecognizing
-        if isLiveScreenAnalysis {
+        if isAnalyzing {
+            awaitingFirstAnalysisResult = true
+            pendingAnalysisIsLive = isLiveScreenAnalysis
             // Full-game scanning has lower protocol priority but still shares
             // neural-network batches with the interactive query. Pause it so
-            // the live position receives the first KataGo result immediately.
+            // the current position receives the first KataGo result first.
             stopFullGameAnalysis()
         }
         let game = gameManager.getGame()
@@ -624,10 +634,9 @@ class BoardViewModel: ObservableObject {
             fastResponse: isLiveScreenAnalysis
         )
 
-        // Trigger background full game analysis if enabled
-        if isAnalyzing && config.display.showWinRateGraph && !isLiveScreenAnalysis {
-            startFullGameAnalysis()
-        }
+        // Ordinary full-game scanning restarts after this node's first result,
+        // so it cannot delay the interactive result that the board is waiting
+        // to present.
     }
 
     func startFullGameAnalysis() {

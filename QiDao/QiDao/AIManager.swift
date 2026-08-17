@@ -173,20 +173,18 @@ class AIManager: ObservableObject {
 
         interactiveTask = Task {
             do {
-                // Normal analysis uses a longer debounce while the user steps
-                // through a tree. Live screen analysis needs the first result
-                // quickly and already supplies a stable, confirmed position.
+                // Keep enough debounce to collapse rapid tree navigation, but
+                // do not make an ordinary board move wait half a second before
+                // KataGo even receives it.
                 try await Task.sleep(
-                    nanoseconds: fastResponse ? 20_000_000 : 500_000_000
+                    nanoseconds: fastResponse ? 20_000_000 : 120_000_000
                 )
 
                 // Cancelling `fullScanTask` only stops QiDao from waiting for
                 // that query; KataGo keeps searching until it receives an
                 // explicit terminate command. Send it on this same ordered
-                // stdin path before the current live-position query.
-                if fastResponse {
-                    try? await engine.terminate(id: "fullscan-\(self.analysisSessionId)")
-                }
+                // stdin path before every interactive query.
+                try? await engine.terminate(id: "fullscan-\(self.analysisSessionId)")
 
                 if let oldId = self.currentAnalysisId {
                     try? await engine.terminate(id: oldId)
@@ -207,15 +205,17 @@ class AIManager: ObservableObject {
                     "boardXSize": metadata.size,
                     "boardYSize": metadata.size,
                     "analyzeTurns": [analyzeTurn],
-                    "priority": fastResponse ? 30 : 10,
+                    "priority": 30,
                     "includeOwnership": fastResponse ? false : displaySettings.showOwnership,
                     "includePolicy": fastResponse ? false : analysisSettings.includePolicy
                 ]
 
-                let reportInterval = fastResponse
-                    ? min(analysisSettings.reportDuringSearchEvery ?? 0.05, 0.05)
-                    : analysisSettings.reportDuringSearchEvery
-                if let reportInterval, reportInterval >= 0.001 {
+                let maximumReportInterval = fastResponse ? 0.05 : 0.25
+                let reportInterval = min(
+                    analysisSettings.reportDuringSearchEvery ?? maximumReportInterval,
+                    maximumReportInterval
+                )
+                if reportInterval >= 0.001 {
                     query["reportDuringSearchEvery"] = reportInterval
                 }
 

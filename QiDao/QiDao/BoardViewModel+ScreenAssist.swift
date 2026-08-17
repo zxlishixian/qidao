@@ -161,7 +161,6 @@ extension BoardViewModel {
             sequence: position.sequence
         )
         if requestAnalysis && isNewSequence {
-            awaitingFirstLiveAIResult = true
             screenAssistManager.beginAIResponseTiming()
             startAnalysisForLivePositionIfNeeded()
         }
