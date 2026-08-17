@@ -10,6 +10,12 @@ struct LiveAIPrioritySmoke {
         case missingLiveResult
         case missingQueryOrder
         case fullScanNotTerminated
+        case ordinaryFullScanNotSubmitted
+        case missingOrdinaryQuery
+        case ordinaryFullScanNotTerminated
+        case wrongOrdinaryPriority
+        case slowOrdinaryReportInterval
+        case missingOrdinaryResult
 
         var errorDescription: String? {
             switch self {
@@ -23,6 +29,18 @@ struct LiveAIPrioritySmoke {
                 return "Unable to find fullscan and qidao queries in the protocol log"
             case .fullScanNotTerminated:
                 return "Live analysis did not terminate the active full scan before querying"
+            case .ordinaryFullScanNotSubmitted:
+                return "Ordinary analysis setup did not submit a full-game scan"
+            case .missingOrdinaryQuery:
+                return "Ordinary analysis did not submit a current-position query"
+            case .ordinaryFullScanNotTerminated:
+                return "Ordinary analysis did not terminate the active full scan before querying"
+            case .wrongOrdinaryPriority:
+                return "Ordinary analysis did not use interactive priority"
+            case .slowOrdinaryReportInterval:
+                return "Ordinary analysis did not request a prompt partial result"
+            case .missingOrdinaryResult:
+                return "Ordinary analysis produced no candidate within five seconds"
             }
         }
     }
@@ -32,13 +50,21 @@ import json
 import sys
 
 log_path = sys.argv[1]
+full_scan_active = False
 for line in sys.stdin:
     message = json.loads(line)
     with open(log_path, "a", encoding="utf-8") as log:
         log.write(json.dumps(message, separators=(",", ":")) + "\n")
         log.flush()
     query_id = message.get("id", "")
-    if message.get("action") is None and query_id.startswith("qidao-"):
+    action = message.get("action")
+    if action == "terminate" and message.get("terminateId", "").startswith("fullscan-"):
+        full_scan_active = False
+        continue
+    if action is None and query_id.startswith("fullscan-"):
+        full_scan_active = True
+        continue
+    if action is None and query_id.startswith("qidao-") and not full_scan_active:
         turn = message.get("analyzeTurns", [0])[0]
         result = {
             "id": query_id,
@@ -162,6 +188,96 @@ for line in sys.stdin:
                 && protocolMessages[index]["terminateId"] as? String == fullScanID
         }
         guard terminatedBeforeLiveQuery else { throw SmokeError.fullScanNotTerminated }
+
+        let ordinaryStartIndex = protocolMessages.count
+        manager.analysisResult = nil
+        manager.startFullGameAnalysis(
+            mainLineMoves: [["B", "D4"], ["W", "Q16"]],
+            initialStones: [],
+            metadata: metadata,
+            config: config,
+            initialPlayer: "B"
+        )
+
+        let ordinaryScanDeadline = Date().addingTimeInterval(3)
+        while !messages(at: logURL).dropFirst(ordinaryStartIndex).contains(where: { message in
+            (message["id"] as? String) == fullScanID
+                && message["action"] == nil
+        }), Date() < ordinaryScanDeadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        let ordinaryScanMessages = messages(at: logURL)
+        guard ordinaryScanMessages.indices.contains(where: { index in
+            index >= ordinaryStartIndex
+                && (ordinaryScanMessages[index]["id"] as? String) == fullScanID
+                && ordinaryScanMessages[index]["action"] == nil
+        }) else {
+            throw SmokeError.ordinaryFullScanNotSubmitted
+        }
+
+        let ordinaryStartedAt = Date()
+        manager.updateAnalysis(
+            currentNodeId: "ordinary-priority",
+            initialStones: [],
+            moves: [["B", "D4"], ["W", "Q16"]],
+            nextPlayer: "B",
+            initialPlayer: "B",
+            turnNumber: 2,
+            metadata: metadata,
+            config: config,
+            fastResponse: false
+        )
+
+        let ordinaryQueryDeadline = Date().addingTimeInterval(3)
+        while !messages(at: logURL).contains(where: {
+            ($0["id"] as? String)?.hasSuffix("-ordinary-priority") == true
+                && $0["action"] == nil
+        }), Date() < ordinaryQueryDeadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        let ordinaryMessages = messages(at: logURL)
+        guard let ordinaryFullScanIndex = ordinaryMessages.indices.last(where: { index in
+            index >= ordinaryStartIndex
+                && (ordinaryMessages[index]["id"] as? String) == fullScanID
+                && ordinaryMessages[index]["action"] == nil
+        }),
+        let ordinaryQueryIndex = ordinaryMessages.indices.first(where: { index in
+            index > ordinaryFullScanIndex
+                && (ordinaryMessages[index]["id"] as? String)?.hasSuffix("-ordinary-priority") == true
+                && ordinaryMessages[index]["action"] == nil
+        }) else {
+            throw SmokeError.missingOrdinaryQuery
+        }
+
+        let ordinaryTerminatedBeforeQuery = ordinaryMessages.indices.contains { index in
+            index > ordinaryFullScanIndex
+                && index < ordinaryQueryIndex
+                && ordinaryMessages[index]["action"] as? String == "terminate"
+                && ordinaryMessages[index]["terminateId"] as? String == fullScanID
+        }
+        guard ordinaryTerminatedBeforeQuery else {
+            throw SmokeError.ordinaryFullScanNotTerminated
+        }
+        guard ordinaryMessages[ordinaryQueryIndex]["priority"] as? Int == 30 else {
+            throw SmokeError.wrongOrdinaryPriority
+        }
+        guard let reportInterval = ordinaryMessages[ordinaryQueryIndex]["reportDuringSearchEvery"] as? Double,
+              reportInterval <= 0.25 else {
+            throw SmokeError.slowOrdinaryReportInterval
+        }
+
+        let ordinaryResultDeadline = Date().addingTimeInterval(5)
+        while !(manager.analysisResult?.id.hasSuffix("-ordinary-priority") == true
+                && manager.analysisResult?.moveInfos.isEmpty == false),
+              Date() < ordinaryResultDeadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        guard manager.analysisResult?.moveInfos.first?.moveStr == "D4",
+              Date().timeIntervalSince(ordinaryStartedAt) < 5 else {
+            throw SmokeError.missingOrdinaryResult
+        }
     }
 
     private static func messages(at url: URL) -> [[String: Any]] {
