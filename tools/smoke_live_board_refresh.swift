@@ -21,6 +21,22 @@ private final class SynchronousDisplayProbeView: NSView {
     }
 }
 
+@MainActor
+private final class RefreshRecordingBoardViewModel: BoardViewModel {
+    private(set) var forcedRefreshes = 0
+
+    override func refreshLiveWindowsIfNeeded(force: Bool = false) {
+        if force {
+            forcedRefreshes += 1
+        }
+        super.refreshLiveWindowsIfNeeded(force: force)
+    }
+
+    func resetForcedRefreshes() {
+        forcedRefreshes = 0
+    }
+}
+
 private struct LiveRevisionProbe: NSViewRepresentable {
     let revision: UInt64
     let probe: LiveRevisionProbeView
@@ -223,6 +239,49 @@ struct LiveBoardRefreshSmoke {
         window.displayIfNeeded()
         displayProbe.reset()
         let renderedRevisionBeforePosition = revisionProbe.renderedRevision
+
+        // Ordinary analysis has no vision heartbeat to keep AppKit awake.
+        // Its first current-node result must request one asynchronous window
+        // invalidation without waiting for a settings-button click.
+        let ordinaryViewModel = RefreshRecordingBoardViewModel()
+        ordinaryViewModel.isAnalyzing = true
+        ordinaryViewModel.updateAnalysis()
+        _ = RunLoop.main.run(
+            mode: .eventTracking,
+            before: Date().addingTimeInterval(1.0)
+        )
+        ordinaryViewModel.resetForcedRefreshes()
+        ordinaryViewModel.aiManager.analysisResult = AnalysisResult(
+            id: "qidao-0-\(ordinaryViewModel.currentNodeId)",
+            turnNumber: UInt32(ordinaryViewModel.moveCount),
+            isDuringSearch: true,
+            noResults: false,
+            rootInfo: AnalysisRootInfo(winrate: 0.58, scoreLead: 1.5, visits: 11),
+            moveInfos: [
+                AnalysisMoveInfo(
+                    moveStr: "D4",
+                    visits: 11,
+                    winrate: 0.58,
+                    scoreLead: 1.5,
+                    pv: ["D4"]
+                )
+            ],
+            ownership: nil
+        )
+        let ordinaryResultDeadline = Date().addingTimeInterval(0.5)
+        while ordinaryViewModel.analysisResult?.moveInfos.first?.moveStr != "D4",
+              Date() < ordinaryResultDeadline {
+            _ = RunLoop.main.run(
+                mode: .eventTracking,
+                before: min(Date().addingTimeInterval(0.02), ordinaryResultDeadline)
+            )
+        }
+        guard ordinaryViewModel.analysisResult?.moveInfos.first?.moveStr == "D4" else {
+            fatalError("Ordinary analysis result did not reach BoardViewModel")
+        }
+        guard ordinaryViewModel.forcedRefreshes > 0 else {
+            fatalError("First ordinary analysis result waited for a settings click")
+        }
 
         let manager = viewModel.screenAssistManager
         manager.boardSize = 9
