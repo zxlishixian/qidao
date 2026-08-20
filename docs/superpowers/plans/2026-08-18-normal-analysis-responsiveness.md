@@ -28,7 +28,7 @@
 - Consumes: `AIManager.startFullGameAnalysis(...)`, `AIManager.updateAnalysis(..., fastResponse:)`, and the Analysis API JSON Lines protocol.
 - Produces: one smoke executable that verifies both live and ordinary interactive queries terminate `fullscan-<session>` before submission and receive a first result within five seconds.
 
-- [ ] **Step 1: Make the fake engine model full-scan contention**
+- [x] **Step 1: Make the fake engine model full-scan contention**
 
 Replace the embedded fake loop with stateful protocol behavior. A full-scan query sets `full_scan_active = True`; its matching terminate command clears the flag; a `qidao-*` query emits the fixed D4 result only when the full scan is no longer active.
 
@@ -64,7 +64,7 @@ for line in sys.stdin:
         print(json.dumps(result, separators=(",", ":")), flush=True)
 ```
 
-- [ ] **Step 2: Add the ordinary-analysis scenario**
+- [x] **Step 2: Add the ordinary-analysis scenario**
 
 After the existing live scenario, start another full scan and submit a new current node with `fastResponse: false`. Use literal protocol expectations: the terminate message must occur between the latest full-scan query and ordinary `qidao-*` query; the ordinary query must use priority `30`; `reportDuringSearchEvery` must be at most `0.25`; and D4 must arrive within five seconds.
 
@@ -85,7 +85,7 @@ manager.updateAnalysis(
 
 Add distinct `SmokeError` cases for missing ordinary result, missing ordinary terminate ordering, wrong priority, and slow report cadence. Do not assert on fake-engine method calls; assert the real JSON protocol log and the real `AIManager.analysisResult` publication.
 
-- [ ] **Step 3: Compile and verify RED**
+- [x] **Step 3: Compile and verify RED**
 
 ```bash
 mkdir -p /private/tmp/qidao-normal-analysis/module-cache
@@ -104,7 +104,7 @@ find QiDao/QiDao -name '*.swift' ! -name 'QiDaoApp.swift' -print0 | xargs -0 swi
 
 Expected: the live scenario passes, then the ordinary scenario fails because the active full scan is not terminated and the fake engine withholds D4. If it reaches query validation first, priority `10` or report interval `1.0` must fail instead.
 
-- [ ] **Step 4: Commit the engine-boundary regression**
+- [x] **Step 4: Commit the engine-boundary regression**
 
 ```bash
 git add tools/smoke_live_ai_priority.swift
@@ -119,38 +119,31 @@ git commit -m "test: reproduce stalled ordinary analysis"
 - Modify: `tools/smoke_live_board_refresh.swift:11-22,201-344`
 
 **Interfaces:**
-- Consumes: `BoardViewModel.updateAnalysis()`, `AIManager.analysisResult`, and `BoardViewModel.refreshLiveWindowsIfNeeded(force:)` through a visible non-key `NSWindow`.
-- Produces: a regression proving that the first ordinary result requests asynchronous window display without invoking `displayIfNeeded()`.
+- Consumes: `BoardViewModel.updateAnalysis()`, `AIManager.analysisResult`, and the `BoardViewModel.refreshLiveWindowsIfNeeded(force:)` presentation boundary.
+- Produces: a regression proving that the first ordinary result requests a forced asynchronous refresh while the existing live-window probe continues to reject synchronous `displayIfNeeded()`.
 
-- [ ] **Step 1: Extend the AppKit display probe**
+- [x] **Step 1: Extend the AppKit display probe**
 
-Count asynchronous display invalidations separately from forbidden synchronous display calls:
+Add a `BoardViewModel` test subclass that records forced refresh requests. Direct
+AppKit invalidation and layout counts are unsuitable here because an idle window
+can generate both without any business-state publication.
 
 ```swift
-private final class SynchronousDisplayProbeView: NSView {
-    private(set) var displayIfNeededCalls = 0
-    private(set) var displayInvalidationCalls = 0
+private final class RefreshRecordingBoardViewModel: BoardViewModel {
+    private(set) var forcedRefreshes = 0
 
-    override func displayIfNeeded() {
-        displayIfNeededCalls += 1
-        super.displayIfNeeded()
+    override func refreshLiveWindowsIfNeeded(force: Bool = false) {
+        if force { forcedRefreshes += 1 }
+        super.refreshLiveWindowsIfNeeded(force: force)
     }
 
-    override func setNeedsDisplay(_ flag: Bool) {
-        if flag { displayInvalidationCalls += 1 }
-        super.setNeedsDisplay(flag)
-    }
-
-    func reset() {
-        displayIfNeededCalls = 0
-        displayInvalidationCalls = 0
-    }
+    func resetForcedRefreshes() { forcedRefreshes = 0 }
 }
 ```
 
-- [ ] **Step 2: Add a non-live ordinary-result scenario**
+- [x] **Step 2: Add a non-live ordinary-result scenario**
 
-Create a second `BoardViewModel` with no screen-assist baseline, a visible borderless window whose content view is only the probe, and `appMode == .analysis`. Set `isAnalyzing = true`, call `updateAnalysis()`, publish a literal current-node `AnalysisResult`, and service only `.eventTracking` mode for at most 500 ms.
+Create a recording `BoardViewModel` with no screen-assist baseline and `appMode == .analysis`. Set `isAnalyzing = true`, call `updateAnalysis()`, reset prior recordings, publish a literal current-node `AnalysisResult`, and service only `.eventTracking` mode for at most 500 ms.
 
 Assert all three user-visible contracts:
 
@@ -158,17 +151,14 @@ Assert all three user-visible contracts:
 guard ordinaryViewModel.analysisResult?.moveInfos.first?.moveStr == "D4" else {
     fatalError("Ordinary analysis result did not reach BoardViewModel")
 }
-guard ordinaryDisplayProbe.displayInvalidationCalls > 0 else {
+guard ordinaryViewModel.forcedRefreshes > 0 else {
     fatalError("First ordinary analysis result waited for a settings click")
-}
-guard ordinaryDisplayProbe.displayIfNeededCalls == 0 else {
-    fatalError("Ordinary analysis reintroduced synchronous display")
 }
 ```
 
-The production mutation this catches is removing the generic first-result pending flag or changing its forced asynchronous invalidation back to live-only behavior.
+The production mutation this catches is removing the generic first-result pending flag or changing its forced asynchronous invalidation back to live-only behavior. The existing inactive live-window scenario still asserts that no synchronous `displayIfNeeded()` occurs.
 
-- [ ] **Step 3: Compile and verify RED**
+- [x] **Step 3: Compile and verify RED**
 
 Use the same `swiftc` command from Task 1, replacing the tool input and output:
 
@@ -188,7 +178,7 @@ find QiDao/QiDao -name '*.swift' ! -name 'QiDaoApp.swift' -print0 | xargs -0 swi
 
 Expected: fail with `First ordinary analysis result waited for a settings click`; existing live-board and synchronous-display checks must reach this scenario successfully.
 
-- [ ] **Step 4: Commit the presentation regression**
+- [x] **Step 4: Commit the presentation regression**
 
 ```bash
 git add tools/smoke_live_board_refresh.swift
@@ -210,7 +200,7 @@ git commit -m "test: reproduce ordinary analysis presentation stall"
 - Consumes: validated current node IDs, `AIManager.analysisSessionId`, existing `fullscan-*` and `qidao-*` protocol IDs, and the asynchronous `refreshLiveWindowsIfNeeded(force:)` invalidation.
 - Produces: `awaitingFirstAnalysisResult: Bool`, `pendingAnalysisIsLive: Bool`, full-scan preemption for every interactive query, and one-shot ordinary result presentation.
 
-- [ ] **Step 1: Give every interactive query the fast engine boundary**
+- [x] **Step 1: Give every interactive query the fast engine boundary**
 
 In `AIManager.updateAnalysis(...)`:
 
@@ -222,7 +212,7 @@ In `AIManager.updateAnalysis(...)`:
 
 Do not change `startFullGameAnalysis` budgets or priorities.
 
-- [ ] **Step 2: Generalize first-result state in BoardViewModel**
+- [x] **Step 2: Generalize first-result state in BoardViewModel**
 
 Replace `awaitingFirstLiveAIResult` with:
 
@@ -241,7 +231,7 @@ stopFullGameAnalysis()
 
 Submit the current query as before, but remove the immediate ordinary `startFullGameAnalysis()` call. Also remove the separate `startFullGameAnalysis()` call from the `isEngineReady` subscription because `updateAnalysis()` now controls recovery.
 
-- [ ] **Step 3: Present the first current result and resume ordinary background work**
+- [x] **Step 3: Present the first current result and resume ordinary background work**
 
 In the throttled `aiManager.$analysisResult` sink, recognize only a non-empty current-node result while `awaitingFirstAnalysisResult` is true. Capture whether this request was live, clear both pending fields, publish the result, and call:
 
@@ -257,11 +247,11 @@ if isFirstCurrentResult,
 
 Stale node IDs and empty results must not clear the pending state or restart the full scan. Subsequent partial results remain bounded by the existing 120 ms Combine throttle and do not force explicit AppKit invalidation.
 
-- [ ] **Step 4: Remove live-only ownership of the pending flag**
+- [x] **Step 4: Remove live-only ownership of the pending flag**
 
 In `finishLivePositionSync`, remove its assignment to the old live-only flag. Keep `beginAIResponseTiming()` and `startAnalysisForLivePositionIfNeeded()` unchanged; the shared `updateAnalysis()` call now establishes the generic pending state. Keep model ACK and asynchronous board refresh behavior unchanged.
 
-- [ ] **Step 5: Compile and verify GREEN**
+- [x] **Step 5: Compile and verify GREEN**
 
 Recompile both Task 1 and Task 2 smoke executables from current source, then run them.
 
@@ -271,7 +261,7 @@ Expected:
 - `Live board refresh OK` includes ordinary first-result invalidation.
 - Both exit 0, use no direct synchronous display, and complete each first-result wait within five seconds.
 
-- [ ] **Step 6: Commit the production fix**
+- [x] **Step 6: Commit the production fix**
 
 ```bash
 git add QiDao/QiDao/AIManager.swift \
@@ -291,7 +281,7 @@ git commit -m "fix: prioritize and present ordinary analysis"
 - Consumes: green focused smokes and the signed local app.
 - Produces: evidence that ordinary analysis updates without opening settings and all existing subsystems remain green.
 
-- [ ] **Step 1: Run complete automated regressions**
+- [x] **Step 1: Run complete automated regressions**
 
 ```bash
 PYTHONPATH=vision python3 -B -m unittest discover -s vision/tests -p 'test_*.py' -v
@@ -304,7 +294,7 @@ git diff --check
 
 Expected: 94 Python tests, 41 Rust tests, repository/CI/release audits, and whitespace validation all pass.
 
-- [ ] **Step 2: Build and verify the app**
+- [x] **Step 2: Build and verify the app**
 
 ```bash
 ./build_app.command
@@ -332,11 +322,11 @@ Do not click an external online board intersection during this validation. Resto
 - Consumes: verified root cause, exact commits, test outputs, and any remaining limitations.
 - Produces: a zero-context handoff and an accurate development ledger.
 
-- [ ] **Step 1: Update MEMO.md**
+- [x] **Step 1: Update MEMO.md**
 
 Add one concise completed entry covering ordinary full-scan preemption, generic first-result presentation, async-only window invalidation, and the focused regression names.
 
-- [ ] **Step 2: Write handoff.md for a new session**
+- [x] **Step 2: Write handoff.md for a new session**
 
 Create `handoff.md` with these concrete sections and current facts:
 
@@ -352,7 +342,7 @@ Do not include absolute private engine/model paths, signing identities, credenti
 
 Change every completed checkbox in this file to `[x]`. Review `git diff --cached --name-status` and ensure only source, smoke, documentation, and handoff files are staged; no model, generated binding, build output, signing material, or local audit branch may be included.
 
-- [ ] **Step 4: Commit documentation**
+- [x] **Step 4: Commit documentation**
 
 ```bash
 git add MEMO.md handoff.md \
